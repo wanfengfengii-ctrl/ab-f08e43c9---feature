@@ -1,8 +1,14 @@
-import type { TauSuccess } from './decode';
+import type { FrameData } from './decode';
 
 interface Props {
   durations: number[];
-  result: TauSuccess;
+  frame: FrameData;
+  /** 逐间隔局部时钟；固定时钟裁决时为全部相同的常量序列 */
+  clocks: number[];
+  /** 标题中对时钟来源的说明，如“固定 τ = 90µs”或“连续漂移复核（上限 3µs）” */
+  clockCaption: string;
+  /** 是否标注每次跳变（漂移复核时开启） */
+  showJumps?: boolean;
 }
 
 const W = 1000;
@@ -10,43 +16,61 @@ const MARGIN_X = 20;
 const ROW_INTERVALS_Y = 56;
 const ROW_BITS_Y = 132;
 const ROW_GROUPS_Y = 190;
-const H = 246;
+const TRAJ_TOP = 258;
+const TRAJ_BOTTOM = 326;
+const H = 356;
 
-/** 按最小 τ 绘制间隔分类（长型/短型）、成位（短型成对）与 5 位分组 */
-export default function PulseDiagram({ durations, result }: Props) {
+const TAU_LO = 80;
+const TAU_HI = 120;
+
+/** 绘制间隔分类（长型/短型）、成位（短型成对）、5 位分组与逐间隔时钟轨迹 */
+export default function PulseDiagram({ durations, frame, clocks, clockCaption, showJumps }: Props) {
   const total = durations.reduce((a, b) => a + b, 0);
   const scale = (W - 2 * MARGIN_X) / total;
 
   // 每个间隔的横向区间（宽度按时长比例）
-  const spans: { x: number; w: number; d: number; cls: 'L' | 'S' }[] = [];
+  const spans: { x: number; w: number; d: number; cls: 'L' | 'S'; tau: number }[] = [];
   let acc = 0;
   durations.forEach((d, i) => {
-    spans.push({ x: MARGIN_X + acc * scale, w: d * scale, d, cls: result.classes[i] });
+    spans.push({
+      x: MARGIN_X + acc * scale,
+      w: d * scale,
+      d,
+      cls: frame.classes[i],
+      tau: clocks[i],
+    });
     acc += d;
   });
 
   // 每个位覆盖的间隔范围：长型 1 个间隔，短型对 2 个
-  const bitSpans = result.members.map((m, bi) => {
+  const bitSpans = frame.members.map((m, bi) => {
     const first = m[0];
     const last = m[m.length - 1];
     return {
       x: spans[first].x,
       w: spans[last].x + spans[last].w - spans[first].x,
-      bit: result.bits[bi],
+      bit: frame.bits[bi],
     };
   });
 
-  const groupLabels = result.groups.map((g, i) => {
+  const groupLabels = frame.groups.map((g, i) => {
     if (i === 0) return `${g.value} 起始`;
-    if (i === result.groups.length - 1) return `${g.value} LRC`;
-    if (i === result.groups.length - 2) return `${g.value} 结束`;
+    if (i === frame.groups.length - 1) return `${g.value} LRC`;
+    if (i === frame.groups.length - 2) return `${g.value} 结束`;
     return `${g.value}`;
   });
 
+  // 逐间隔时钟轨迹：点位于间隔水平中心，纵向按 τ 映射
+  const trajY = (t: number) =>
+    TRAJ_BOTTOM - ((t - TAU_LO) / (TAU_HI - TAU_LO)) * (TRAJ_BOTTOM - TRAJ_TOP);
+  const points = spans.map((s) => ({ x: s.x + s.w / 2, y: trajY(s.tau), cls: s.cls, tau: s.tau, w: s.w }));
+  const polyline = points.map((p) => `${p.x},${p.y}`).join(' ');
+  const gridTaus = [80, 90, 100, 110, 120];
+
   return (
-    <svg className="pulse-diagram" viewBox={`0 0 ${W} ${H}`} role="img" aria-label="间隔分类与成位图">
+    <svg className="pulse-diagram" viewBox={`0 0 ${W} ${H}`} role="img" aria-label="间隔分类、成位与逐间隔时钟轨迹图">
       <text x={MARGIN_X} y={20} className="dg-title">
-        间隔分类（按 τ = {result.tau}µs；长型→位 0，相邻短型对→位 1）
+        间隔分类（{clockCaption}；长型→位 0，相邻短型对→位 1）
       </text>
 
       {/* 间隔条 */}
@@ -78,7 +102,7 @@ export default function PulseDiagram({ durations, result }: Props) {
       ))}
 
       {/* 每 5 位一组，标注码值与角色 */}
-      {result.groups.map((_, gi) => {
+      {frame.groups.map((_, gi) => {
         const startBit = gi * 5;
         const endBit = startBit + 4;
         const x0 = bitSpans[startBit].x - 4;
@@ -86,9 +110,9 @@ export default function PulseDiagram({ durations, result }: Props) {
         const role =
           gi === 0
             ? 'grp-start'
-            : gi === result.groups.length - 1
+            : gi === frame.groups.length - 1
               ? 'grp-lrc'
-              : gi === result.groups.length - 2
+              : gi === frame.groups.length - 2
                 ? 'grp-end'
                 : 'grp-data';
         return (
@@ -100,6 +124,49 @@ export default function PulseDiagram({ durations, result }: Props) {
           </g>
         );
       })}
+
+      {/* 逐间隔局部时钟轨迹 */}
+      <text x={MARGIN_X} y={250} className="dg-title">
+        逐间隔局部时钟 τ（µs）
+      </text>
+      {gridTaus.map((t) => (
+        <g key={`grid-${t}`}>
+          <line x1={MARGIN_X} y1={trajY(t)} x2={W - MARGIN_X} y2={trajY(t)} className="traj-grid" />
+          <text x={W - MARGIN_X - 2} y={trajY(t) - 3} className="traj-grid-label">
+            {t}
+          </text>
+        </g>
+      ))}
+      <polyline points={polyline} className="traj-line" />
+      {points.map((p, i) => (
+        <g key={`traj-${i}`}>
+          <circle cx={p.x} cy={p.y} r={3.5} className={`traj-point traj-point-${p.cls}`} />
+          {p.w >= 24 && (
+            <text x={p.x} y={p.y - 7} className="traj-tau-label">
+              {p.tau}
+            </text>
+          )}
+        </g>
+      ))}
+      {showJumps &&
+        points.slice(1).map((p, i) => {
+          const prev = points[i];
+          const delta = p.tau - prev.tau;
+          if (delta === 0) return null;
+          const midX = (prev.x + p.x) / 2;
+          const midY = (prev.y + p.y) / 2;
+          if (p.x - prev.x < 16) return null; // 过窄处在下方跳变明细表中列出
+          return (
+            <text
+              key={`jump-${i}`}
+              x={midX}
+              y={midY - 6}
+              className={`traj-jump ${delta > 0 ? 'jump-up' : 'jump-down'}`}
+            >
+              {delta > 0 ? `+${delta}` : delta}
+            </text>
+          );
+        })}
     </svg>
   );
 }

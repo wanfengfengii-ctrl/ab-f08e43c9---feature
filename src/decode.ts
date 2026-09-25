@@ -45,15 +45,8 @@ export interface BitGroup {
   bits: number[];
 }
 
-export interface TauFailure {
-  tau: number;
-  ok: false;
-  reason: string;
-}
-
-export interface TauSuccess {
-  tau: number;
-  ok: true;
+/** 成位并通过全部帧校验后得到的解码数据（与使用单一 τ 还是逐间隔局部时钟无关） */
+export interface FrameData {
   /** 每个间隔的分类（长度 = 间隔数） */
   classes: IntervalClass[];
   /** 成位后的位流 */
@@ -65,7 +58,94 @@ export interface TauSuccess {
   digits: string;
 }
 
+export interface TauFailure {
+  tau: number;
+  ok: false;
+  reason: string;
+}
+
+export interface TauSuccess extends FrameData {
+  tau: number;
+  ok: true;
+}
+
 export type TauResult = TauFailure | TauSuccess;
+
+/**
+ * 在分类序列已确定后完成“成位 → 分组 → 帧校验”。
+ * 固定 τ 裁决与连续漂移复核共用本函数：规则与时钟如何选取无关。
+ */
+export function buildFrame(classes: IntervalClass[]):
+  | { ok: true } & FrameData
+  | { ok: false; reason: string } {
+  // 成位：长型 -> 0；相邻短型两两 -> 1；奇数连短型 => 孤立短型
+  const bits: number[] = [];
+  const members: number[][] = [];
+  for (let i = 0; i < classes.length; ) {
+    if (classes[i] === 'L') {
+      bits.push(0);
+      members.push([i]);
+      i++;
+    } else {
+      if (classes[i + 1] !== 'S') {
+        return { ok: false, reason: `间隔 ${i + 1} 是孤立短型` };
+      }
+      bits.push(1);
+      members.push([i, i + 1]);
+      i += 2;
+    }
+  }
+
+  if (bits.length === 0) return { ok: false, reason: '位流为空' };
+  if (bits.length % 5 !== 0) {
+    return { ok: false, reason: `位流长度 ${bits.length} 不是 5 的整数倍，帧外存在残余位` };
+  }
+
+  const groups: BitGroup[] = [];
+  for (let g = 0; g < bits.length; g += 5) {
+    const slice = bits.slice(g, g + 5);
+    const value = slice[0] | (slice[1] << 1) | (slice[2] << 2) | (slice[3] << 3);
+    const parityBit = slice[4];
+    const ones = slice.reduce((a, b) => a + b, 0);
+    groups.push({ value, parityBit, parityOk: ones % 2 === 1, bits: slice });
+  }
+
+  const badParity = groups.findIndex((g) => !g.parityOk);
+  if (badParity >= 0) {
+    return { ok: false, reason: `第 ${badParity + 1} 组奇校验失败` };
+  }
+
+  const codeCount = groups.length;
+  const payloadCount = codeCount - 3;
+  if (payloadCount < MIN_PAYLOADS || payloadCount > MAX_PAYLOADS) {
+    return { ok: false, reason: `载荷码数量 ${payloadCount} 不在 1..12 内` };
+  }
+
+  const codes = groups.map((g) => g.value);
+  if (codes[0] !== START_CODE) return { ok: false, reason: `起始码应为 ${START_CODE}，实际 ${codes[0]}` };
+  if (codes[codeCount - 2] !== END_CODE) {
+    return { ok: false, reason: `结束码应为 ${END_CODE}，实际 ${codes[codeCount - 2]}` };
+  }
+  for (let p = 0; p < payloadCount; p++) {
+    const v = codes[1 + p];
+    if (v < 0 || v > 9) return { ok: false, reason: `载荷码 ${p + 1} = ${v} 超出 0..9` };
+  }
+  let lrc = 0;
+  for (let i = 0; i < codeCount - 1; i++) lrc ^= codes[i];
+  if (codes[codeCount - 1] !== lrc) {
+    return { ok: false, reason: `LRC 应为 ${lrc}，实际 ${codes[codeCount - 1]}` };
+  }
+
+  return {
+    ok: true,
+    classes,
+    bits,
+    members,
+    groups,
+    codes,
+    digits: codes.slice(1, 1 + payloadCount).join(''),
+  };
+}
 
 /**
  * 在给定 τ 下完成“分类 → 成位 → 分组 → 帧校验”的完整解码
@@ -80,74 +160,10 @@ export function decodeWithTau(tau: number, durations: number[]): TauResult {
     classes.push(kind);
   }
 
-  // 成位：长型 -> 0；相邻短型两两 -> 1；奇数连短型 => 孤立短型
-  const bits: number[] = [];
-  const members: number[][] = [];
-  for (let i = 0; i < classes.length; ) {
-    if (classes[i] === 'L') {
-      bits.push(0);
-      members.push([i]);
-      i++;
-    } else {
-      if (classes[i + 1] !== 'S') {
-        return { tau, ok: false, reason: `间隔 ${i + 1} 是孤立短型` };
-      }
-      bits.push(1);
-      members.push([i, i + 1]);
-      i += 2;
-    }
-  }
-
-  if (bits.length === 0) return { tau, ok: false, reason: '位流为空' };
-  if (bits.length % 5 !== 0) {
-    return { tau, ok: false, reason: `位流长度 ${bits.length} 不是 5 的整数倍，帧外存在残余位` };
-  }
-
-  const groups: BitGroup[] = [];
-  for (let g = 0; g < bits.length; g += 5) {
-    const slice = bits.slice(g, g + 5);
-    const value = slice[0] | (slice[1] << 1) | (slice[2] << 2) | (slice[3] << 3);
-    const parityBit = slice[4];
-    const ones = slice.reduce((a, b) => a + b, 0);
-    groups.push({ value, parityBit, parityOk: ones % 2 === 1, bits: slice });
-  }
-
-  const badParity = groups.findIndex((g) => !g.parityOk);
-  if (badParity >= 0) {
-    return { tau, ok: false, reason: `第 ${badParity + 1} 组奇校验失败` };
-  }
-
-  const codeCount = groups.length;
-  const payloadCount = codeCount - 3;
-  if (payloadCount < MIN_PAYLOADS || payloadCount > MAX_PAYLOADS) {
-    return { tau, ok: false, reason: `载荷码数量 ${payloadCount} 不在 1..12 内` };
-  }
-
-  const codes = groups.map((g) => g.value);
-  if (codes[0] !== START_CODE) return { tau, ok: false, reason: `起始码应为 ${START_CODE}，实际 ${codes[0]}` };
-  if (codes[codeCount - 2] !== END_CODE) {
-    return { tau, ok: false, reason: `结束码应为 ${END_CODE}，实际 ${codes[codeCount - 2]}` };
-  }
-  for (let p = 0; p < payloadCount; p++) {
-    const v = codes[1 + p];
-    if (v < 0 || v > 9) return { tau, ok: false, reason: `载荷码 ${p + 1} = ${v} 超出 0..9` };
-  }
-  let lrc = 0;
-  for (let i = 0; i < codeCount - 1; i++) lrc ^= codes[i];
-  if (codes[codeCount - 1] !== lrc) {
-    return { tau, ok: false, reason: `LRC 应为 ${lrc}，实际 ${codes[codeCount - 1]}` };
-  }
-
-  return {
-    tau,
-    ok: true,
-    classes,
-    bits,
-    members,
-    groups,
-    codes,
-    digits: codes.slice(1, 1 + payloadCount).join(''),
-  };
+  const frame = buildFrame(classes);
+  if (!frame.ok) return { tau, ok: false, reason: frame.reason };
+  const { ok: _ok, ...frameData } = frame;
+  return { tau, ok: true, ...frameData };
 }
 
 export type OverallStatus = 'unreadable' | 'decoded' | 'ambiguous';

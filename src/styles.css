@@ -131,3 +131,47 @@ th { color: var(--muted); font-weight: 600; }
 .sweep-table { margin-top: 10px; font-size: 13px; }
 .sweep-table tr[data-ok="1"] td:nth-child(2) { color: var(--ok); }
 .sweep-table tr[data-ok="0"] td:nth-child(2) { color: var(--bad); }
+
+/* 连续漂移复核 */
+.drift-box {
+  margin-top: 16px;
+  padding: 14px 16px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  background: var(--panel-2);
+}
+.drift-box h3 { margin: 0 0 6px; font-size: 15px; }
+.drift-form { display: flex; align-items: center; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
+.drift-form label { font-size: 13px; color: var(--muted); }
+.drift-form input {
+  width: 130px;
+  background: #0c111c;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 7px 10px;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 14px;
+}
+.drift-form input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.drift-error { margin-top: 8px; color: var(--bad); font-size: 13px; }
+.drift-result { margin-top: 14px; border-top: 1px solid var(--border); padding-top: 12px; }
+.drift-result h3 { margin: 0 0 10px; font-size: 15px; }
+.traj-cell { font-size: 12px; letter-spacing: 0; word-break: break-all; }
+
+.traj-grid { stroke: var(--border); stroke-width: 1; stroke-dasharray: 3 4; }
+.traj-grid-label { fill: var(--muted); font-size: 10px; text-anchor: end; font-family: ui-monospace, Menlo, monospace; }
+.traj-line { stroke: var(--accent); stroke-width: 2; fill: none; }
+.traj-point { stroke: #0c111c; stroke-width: 1; }
+.traj-point-L { fill: var(--long); }
+.traj-point-S { fill: var(--short); }
+.traj-tau-label { fill: var(--text); font-size: 9px; text-anchor: middle; font-family: ui-monospace, Menlo, monospace; }
+.traj-jump { font-size: 10px; text-anchor: middle; font-weight: 700; font-family: ui-monospace, Menlo, monospace; }
+.traj-jump.jump-up { fill: #7ee2a8; }
+.traj-jump.jump-down { fill: #ff9a9a; }
+
+.drift-jumps-details { margin-top: 12px; }
+.drift-jumps-details summary { cursor: pointer; font-weight: 600; font-size: 13px; color: var(--muted); }
+.drift-jumps-table { margin-top: 8px; }
+.jump-up-row td:last-child { color: #7ee2a8; }
+.jump-down-row td:last-child { color: #ff9a9a; }

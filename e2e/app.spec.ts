@@ -98,3 +98,117 @@ test.describe('初始状态', () => {
     await expect(page.getByTestId('input-errors')).toHaveCount(0);
   });
 });
+
+test.describe('连续漂移复核', () => {
+  test('连续漂移示例：普通裁决 unreadable，发起复核后 decoded 并展示轨迹与每次跳变', async ({ page }) => {
+    await page.getByTestId('sample-continuous-drift').click();
+
+    // 普通裁决仍为 unreadable，原有输入与 τ 枚举明细保持可用
+    await expect(page.getByTestId('result-status')).toHaveText('unreadable');
+    const driftPanel = page.getByTestId('drift-review');
+    await expect(driftPanel).toBeVisible();
+    await expect(page.getByTestId('drift-result')).toHaveCount(0);
+
+    // 上限 1µs 即可见证（编码时钟每步至多变化 1µs）
+    await page.getByTestId('drift-limit').fill('1');
+    await page.getByTestId('drift-submit').click();
+
+    await expect(page.getByTestId('drift-status')).toHaveText('decoded');
+    await expect(page.getByTestId('drift-digits')).toHaveText('5209');
+    await expect(page.getByTestId('drift-summary')).toContainText('总跳变量');
+    await expect(page.getByTestId('drift-summary')).toContainText('20');
+
+    // 逐间隔时钟轨迹：54 个间隔、54 个时钟、54 行跳变明细
+    const clocks = (await page.getByTestId('drift-clocks').innerText()).split(', ').map(Number);
+    expect(clocks).toHaveLength(54);
+    expect(Math.min(...clocks)).toBeGreaterThanOrEqual(80);
+    expect(Math.max(...clocks)).toBeLessThanOrEqual(120);
+    await expect(page.getByTestId('drift-jump-row')).toHaveCount(54);
+    // 首行无跳变；其余行带符号且绝对值不超过上限
+    const jumpRows = await page.getByTestId('drift-jump-row').evaluateAll((els) =>
+      els.slice(1).map((e) => Number((e as HTMLElement).dataset.jump)),
+    );
+    expect(jumpRows).toHaveLength(53);
+    expect(jumpRows.every((j) => Math.abs(j) <= 1)).toBe(true);
+    expect(jumpRows.reduce((a, b) => a + Math.abs(b), 0)).toBe(20);
+
+    // SVG 轨迹与跳变标注
+    const svg = page.locator('svg.pulse-diagram');
+    await expect(svg.locator('polyline.traj-line')).toBeVisible();
+    await expect(svg.locator('circle.traj-point-L').first()).toBeVisible();
+    await expect(svg.locator('circle.traj-point-S').first()).toBeVisible();
+    await expect(svg.locator('text.traj-jump').first()).toBeVisible();
+
+    // 帧结构仍按既有规则整体成立：码表保留
+    await expect(page.getByTestId('codes-table')).toContainText('起始码');
+    await expect(page.getByTestId('codes-table')).toContainText('结束码');
+    await expect(page.getByTestId('codes-table')).toContainText('LRC');
+
+    // 普通裁决与 τ 枚举明细仍可用，且其中没有任何固定 τ 有效
+    await page.getByTestId('sweep-summary').click();
+    expect(await page.getByTestId('sweep-row[data-ok="1"]').count()).toBe(0);
+  });
+
+  test('非法跳变上限给出错误且不产出结论；边界 0..40 外拒绝', async ({ page }) => {
+    await page.getByTestId('sample-continuous-drift').click();
+
+    await page.getByTestId('drift-limit').fill('abc');
+    await expect(page.getByTestId('drift-limit-error')).toBeVisible();
+    await page.getByTestId('drift-submit').click();
+    await expect(page.getByTestId('drift-result')).toHaveCount(0);
+
+    await page.getByTestId('drift-limit').fill('41');
+    await expect(page.getByTestId('drift-limit-error')).toContainText('0..40');
+    await page.getByTestId('drift-submit').click();
+    await expect(page.getByTestId('drift-result')).toHaveCount(0);
+
+    await page.getByTestId('drift-limit').fill('1');
+    await expect(page.getByTestId('drift-limit-error')).toHaveCount(0);
+  });
+
+  test('编辑跳变上限立即撤下旧漂移结论；重新发起后恢复', async ({ page }) => {
+    await page.getByTestId('sample-continuous-drift').click();
+    await page.getByTestId('drift-limit').fill('1');
+    await page.getByTestId('drift-submit').click();
+    await expect(page.getByTestId('drift-status')).toHaveText('decoded');
+
+    // 任何按键编辑都撤下旧结论
+    await page.getByTestId('drift-limit').fill('12');
+    await expect(page.getByTestId('drift-result')).toHaveCount(0);
+
+    await page.getByTestId('drift-submit').click();
+    await expect(page.getByTestId('drift-status')).toHaveText('decoded');
+    await expect(page.getByTestId('drift-digits')).toHaveText('5209');
+  });
+
+  test('编辑脉冲输入撤下旧漂移结论并回到普通裁决流程', async ({ page }) => {
+    await page.getByTestId('sample-continuous-drift').click();
+    await page.getByTestId('drift-limit').fill('1');
+    await page.getByTestId('drift-submit').click();
+    await expect(page.getByTestId('drift-status')).toHaveText('decoded');
+
+    // 切换到普通可解码示例：复核入口不再出现（普通裁决已 decoded）
+    await page.getByTestId('sample-decoded').click();
+    await expect(page.getByTestId('result-status')).toHaveText('decoded');
+    await expect(page.getByTestId('drift-review')).toHaveCount(0);
+    await expect(page.getByTestId('result-digits')).toHaveText('48321');
+  });
+
+  test('上限 0 与固定时钟裁决一致：孤立短型复核仍为 unreadable', async ({ page }) => {
+    await page.getByTestId('sample-unreadable').click();
+    await expect(page.getByTestId('result-status')).toHaveText('unreadable');
+    await page.getByTestId('drift-limit').fill('40');
+    await page.getByTestId('drift-submit').click();
+    await expect(page.getByTestId('drift-status')).toHaveText('unreadable');
+    await expect(page.getByTestId('drift-reason')).toContainText('孤立短型');
+  });
+
+  test('跳变上限太小时明确 unreadable，图示不出现', async ({ page }) => {
+    await page.getByTestId('sample-continuous-drift').click();
+    await page.getByTestId('drift-limit').fill('0');
+    await page.getByTestId('drift-submit').click();
+    await expect(page.getByTestId('drift-status')).toHaveText('unreadable');
+    await expect(page.getByTestId('drift-digits')).toHaveCount(0);
+    await expect(page.locator('polyline.traj-line')).toHaveCount(0);
+  });
+});
