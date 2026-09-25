@@ -67,19 +67,27 @@ export interface TauSuccess {
 
 export type TauResult = TauFailure | TauSuccess;
 
-/**
- * 在给定 τ 下完成“分类 → 成位 → 分组 → 帧校验”的完整解码
- * @param durations 间隔时长数组（每个元素即一个 d，单位微秒）
- */
-export function decodeWithTau(tau: number, durations: number[]): TauResult {
-  const classes: IntervalClass[] = [];
-  for (let i = 0; i < durations.length; i++) {
-    const kind = classifyInterval(durations[i], tau);
-    if (kind === 'none') return { tau, ok: false, reason: `间隔 ${i + 1} 既非长型也非短型` };
-    if (kind === 'both') return { tau, ok: false, reason: `间隔 ${i + 1} 同时兼属长型与短型` };
-    classes.push(kind);
-  }
+interface ClassesSuccess {
+  ok: true;
+  bits: number[];
+  members: number[][];
+  groups: BitGroup[];
+  codes: number[];
+  digits: string;
+}
 
+interface ClassesFailure {
+  ok: false;
+  reason: string;
+}
+
+export type ClassesResult = ClassesSuccess | ClassesFailure;
+
+/**
+ * 对已经确定的长短型分类序列完成“成位 → 分组 → 帧校验”。
+ * 固定 τ 解码与连续漂移复核共用这一段，保证规则完全一致。
+ */
+export function decodeClasses(classes: IntervalClass[]): ClassesResult {
   // 成位：长型 -> 0；相邻短型两两 -> 1；奇数连短型 => 孤立短型
   const bits: number[] = [];
   const members: number[][] = [];
@@ -90,7 +98,7 @@ export function decodeWithTau(tau: number, durations: number[]): TauResult {
       i++;
     } else {
       if (classes[i + 1] !== 'S') {
-        return { tau, ok: false, reason: `间隔 ${i + 1} 是孤立短型` };
+        return { ok: false, reason: `间隔 ${i + 1} 是孤立短型` };
       }
       bits.push(1);
       members.push([i, i + 1]);
@@ -98,9 +106,9 @@ export function decodeWithTau(tau: number, durations: number[]): TauResult {
     }
   }
 
-  if (bits.length === 0) return { tau, ok: false, reason: '位流为空' };
+  if (bits.length === 0) return { ok: false, reason: '位流为空' };
   if (bits.length % 5 !== 0) {
-    return { tau, ok: false, reason: `位流长度 ${bits.length} 不是 5 的整数倍，帧外存在残余位` };
+    return { ok: false, reason: `位流长度 ${bits.length} 不是 5 的整数倍，帧外存在残余位` };
   }
 
   const groups: BitGroup[] = [];
@@ -114,40 +122,49 @@ export function decodeWithTau(tau: number, durations: number[]): TauResult {
 
   const badParity = groups.findIndex((g) => !g.parityOk);
   if (badParity >= 0) {
-    return { tau, ok: false, reason: `第 ${badParity + 1} 组奇校验失败` };
+    return { ok: false, reason: `第 ${badParity + 1} 组奇校验失败` };
   }
 
   const codeCount = groups.length;
   const payloadCount = codeCount - 3;
   if (payloadCount < MIN_PAYLOADS || payloadCount > MAX_PAYLOADS) {
-    return { tau, ok: false, reason: `载荷码数量 ${payloadCount} 不在 1..12 内` };
+    return { ok: false, reason: `载荷码数量 ${payloadCount} 不在 1..12 内` };
   }
 
   const codes = groups.map((g) => g.value);
-  if (codes[0] !== START_CODE) return { tau, ok: false, reason: `起始码应为 ${START_CODE}，实际 ${codes[0]}` };
+  if (codes[0] !== START_CODE) return { ok: false, reason: `起始码应为 ${START_CODE}，实际 ${codes[0]}` };
   if (codes[codeCount - 2] !== END_CODE) {
-    return { tau, ok: false, reason: `结束码应为 ${END_CODE}，实际 ${codes[codeCount - 2]}` };
+    return { ok: false, reason: `结束码应为 ${END_CODE}，实际 ${codes[codeCount - 2]}` };
   }
   for (let p = 0; p < payloadCount; p++) {
     const v = codes[1 + p];
-    if (v < 0 || v > 9) return { tau, ok: false, reason: `载荷码 ${p + 1} = ${v} 超出 0..9` };
+    if (v < 0 || v > 9) return { ok: false, reason: `载荷码 ${p + 1} = ${v} 超出 0..9` };
   }
   let lrc = 0;
   for (let i = 0; i < codeCount - 1; i++) lrc ^= codes[i];
   if (codes[codeCount - 1] !== lrc) {
-    return { tau, ok: false, reason: `LRC 应为 ${lrc}，实际 ${codes[codeCount - 1]}` };
+    return { ok: false, reason: `LRC 应为 ${lrc}，实际 ${codes[codeCount - 1]}` };
   }
 
-  return {
-    tau,
-    ok: true,
-    classes,
-    bits,
-    members,
-    groups,
-    codes,
-    digits: codes.slice(1, 1 + payloadCount).join(''),
-  };
+  return { ok: true, bits, members, groups, codes, digits: codes.slice(1, 1 + payloadCount).join('') };
+}
+
+/**
+ * 在给定 τ 下完成“分类 → 成位 → 分组 → 帧校验”的完整解码
+ * @param durations 间隔时长数组（每个元素即一个 d，单位微秒）
+ */
+export function decodeWithTau(tau: number, durations: number[]): TauResult {
+  const classes: IntervalClass[] = [];
+  for (let i = 0; i < durations.length; i++) {
+    const kind = classifyInterval(durations[i], tau);
+    if (kind === 'none') return { tau, ok: false, reason: `间隔 ${i + 1} 既非长型也非短型` };
+    if (kind === 'both') return { tau, ok: false, reason: `间隔 ${i + 1} 同时兼属长型与短型` };
+    classes.push(kind);
+  }
+
+  const r = decodeClasses(classes);
+  if (!r.ok) return { tau, ok: false, reason: r.reason };
+  return { tau, classes, ...r };
 }
 
 export type OverallStatus = 'unreadable' | 'decoded' | 'ambiguous';

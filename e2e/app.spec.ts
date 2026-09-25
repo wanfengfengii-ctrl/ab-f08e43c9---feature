@@ -98,3 +98,85 @@ test.describe('初始状态', () => {
     await expect(page.getByTestId('input-errors')).toHaveCount(0);
   });
 });
+
+test.describe('连续漂移复核', () => {
+  test('缓慢漂移示例：普通裁决 unreadable，复核后 decoded 并展示轨迹与每次跳变', async ({ page }) => {
+    await page.getByTestId('sample-drift-review').click();
+
+    // 普通裁决 unreadable，复核面板出现；示例预填跳变量 1
+    await expect(page.getByTestId('result-status')).toHaveText('unreadable');
+    await expect(page.getByTestId('drift-panel')).toBeVisible();
+    await expect(page.getByTestId('jump-input')).toHaveValue('1');
+
+    await page.getByTestId('drift-run').click();
+    await expect(page.getByTestId('drift-status')).toHaveText('decoded');
+    await expect(page.getByTestId('drift-digits')).toHaveText('48321');
+    await expect(page.getByTestId('drift-total-jump')).toHaveText('8');
+
+    // 逐间隔时钟轨迹：全部落在 80..120，首末被窗口夹到 96 / 104
+    const traj = (await page.getByTestId('drift-trajectory').innerText()).split(', ').map(Number);
+    expect(traj.length).toBeGreaterThan(0);
+    expect(traj.every((t) => t >= 80 && t <= 120)).toBe(true);
+    expect(traj[0]).toBe(96);
+    expect(traj[traj.length - 1]).toBe(104);
+
+    // 每次跳变：条数 = 间隔数 - 1，绝对值之和 = 总跳变量
+    const jumps = (await page.getByTestId('drift-jumps').innerText()).split(', ');
+    expect(jumps.length).toBe(traj.length - 1);
+    const sum = traj.slice(1).reduce((a, t, i) => a + Math.abs(t - traj[i]), 0);
+    expect(sum).toBe(8);
+
+    // 轨迹图示与码表
+    await expect(page.getByTestId('drift-diagram')).toBeVisible();
+    await expect(page.getByTestId('drift-codes-table')).toContainText('起始码');
+    await expect(page.getByTestId('drift-codes-table')).toContainText('结束码');
+    await expect(page.getByTestId('drift-codes-table')).toContainText('LRC');
+  });
+
+  test('跳变量 0 时与固定时钟裁决一致：缓慢漂移示例仍 unreadable', async ({ page }) => {
+    await page.getByTestId('sample-drift-review').click();
+    await page.getByTestId('jump-input').fill('0');
+    await page.getByTestId('drift-run').click();
+    await expect(page.getByTestId('drift-status')).toHaveText('unreadable');
+    await expect(page.getByTestId('drift-digits')).toHaveCount(0);
+  });
+
+  test('非法跳变量：显示错误并撤下旧漂移结论', async ({ page }) => {
+    await page.getByTestId('sample-drift-review').click();
+    await page.getByTestId('drift-run').click();
+    await expect(page.getByTestId('drift-status')).toHaveText('decoded');
+
+    await page.getByTestId('jump-input').fill('1.5');
+    await expect(page.getByTestId('jump-error')).toBeVisible();
+    await expect(page.getByTestId('drift-result')).toHaveCount(0);
+    await expect(page.getByTestId('drift-run')).toBeDisabled();
+
+    await page.getByTestId('jump-input').fill('-2');
+    await expect(page.getByTestId('jump-error')).toBeVisible();
+    await expect(page.getByTestId('drift-result')).toHaveCount(0);
+  });
+
+  test('编辑脉冲输入撤下旧漂移结论', async ({ page }) => {
+    await page.getByTestId('sample-drift-review').click();
+    await page.getByTestId('drift-run').click();
+    await expect(page.getByTestId('drift-status')).toHaveText('decoded');
+
+    // 换成另一条 unreadable 记录：旧漂移结论必须撤下
+    await page.getByTestId('sample-unreadable').click();
+    await expect(page.getByTestId('result-status')).toHaveText('unreadable');
+    await expect(page.getByTestId('drift-result')).toHaveCount(0);
+  });
+
+  test('普通裁决非 unreadable 时不显示复核面板', async ({ page }) => {
+    await page.getByTestId('sample-decoded').click();
+    await expect(page.getByTestId('result-status')).toHaveText('decoded');
+    await expect(page.getByTestId('drift-panel')).toHaveCount(0);
+  });
+
+  test('跳变量为空时复核按钮不可用', async ({ page }) => {
+    await page.getByTestId('sample-unreadable').click();
+    await expect(page.getByTestId('drift-panel')).toBeVisible();
+    await expect(page.getByTestId('jump-input')).toHaveValue('');
+    await expect(page.getByTestId('drift-run')).toBeDisabled();
+  });
+});

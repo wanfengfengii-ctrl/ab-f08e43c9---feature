@@ -5,11 +5,14 @@ import {
   validateInput,
   TAU_MIN,
   TAU_MAX,
+  type BitGroup,
   type Overall,
   type InputError,
 } from './decode';
-import { encodeDigits } from './encode';
+import { reviewDrift, validateJumpLimit, type DriftReview } from './drift';
+import { encodeDigits, encodeDigitsDrifted } from './encode';
 import PulseDiagram from './PulseDiagram';
+import DriftDiagram from './DriftDiagram';
 
 interface View {
   errors: InputError[];
@@ -19,6 +22,9 @@ interface View {
 
 export default function App() {
   const [text, setText] = useState('');
+  const [jumpText, setJumpText] = useState('');
+  // 漂移结论与产生它的 (脉冲输入, 跳变量) 绑定；任何编辑都会使键失配，旧结论随即撤下
+  const [drift, setDrift] = useState<{ key: string; outcome: DriftReview } | null>(null);
 
   const view = useMemo<View>(() => {
     const trimmed = text.trim();
@@ -38,6 +44,19 @@ export default function App() {
     }
     return out;
   }, [view.durations]);
+
+  const jump = useMemo(() => validateJumpLimit(jumpText), [jumpText]);
+  const driftKey = useMemo(() => JSON.stringify([text, jumpText]), [text, jumpText]);
+  const activeDrift = drift && drift.key === driftKey ? drift.outcome : null;
+
+  const runDrift = () => {
+    if (!view.durations || !jump.ok) {
+      // 非法跳变量：撤下旧漂移结论
+      setDrift(null);
+      return;
+    }
+    setDrift({ key: driftKey, outcome: reviewDrift(view.durations, jump.value) });
+  };
 
   return (
     <main className="page">
@@ -75,6 +94,16 @@ export default function App() {
           >
             示例：孤立短型
           </button>
+          <button
+            type="button"
+            data-testid="sample-drift-review"
+            onClick={() => {
+              setText(JSON.stringify(encodeDigitsDrifted('48321', 90, 110)));
+              setJumpText('1');
+            }}
+          >
+            示例：缓慢漂移
+          </button>
           <button type="button" onClick={() => setText('')}>清空</button>
         </div>
       </section>
@@ -95,6 +124,37 @@ export default function App() {
 
       {view.outcome && <Result outcome={view.outcome} durations={view.durations!} />}
 
+      {view.outcome?.status === 'unreadable' && view.durations && (
+        <section className="panel drift-panel" data-testid="drift-panel">
+          <h2>连续漂移复核</h2>
+          <p className="hint">
+            读头在一次刷卡中可能持续缓慢变速。填写相邻间隔允许的整数时钟跳变量后发起复核：
+            复核为每个原始间隔选择 {TAU_MIN}..{TAU_MAX}µs 的整数局部时钟，相邻局部时钟之差不超过该上限；
+            长短型互斥、短型成位、奇校验、帧与 LRC 规则仍对整条记录联合成立（不切段、不逐项独立判定）。
+          </p>
+          <div className="drift-controls">
+            <label htmlFor="jump-input">最大跳变量（整数 µs，0 = 固定时钟）</label>
+            <input
+              id="jump-input"
+              data-testid="jump-input"
+              value={jumpText}
+              onChange={(e) => setJumpText(e.target.value)}
+              inputMode="numeric"
+              placeholder="例如 1"
+            />
+            <button type="button" data-testid="drift-run" disabled={!jump.ok} onClick={runDrift}>
+              发起连续漂移复核
+            </button>
+          </div>
+          {jumpText.trim() !== '' && !jump.ok && (
+            <p className="jump-error" data-testid="jump-error">
+              {jump.message}
+            </p>
+          )}
+          {activeDrift && <DriftResult outcome={activeDrift} durations={view.durations} />}
+        </section>
+      )}
+
       {sweep.length > 0 && <TauSweep rows={sweep} />}
     </main>
   );
@@ -107,7 +167,9 @@ function Result({ outcome, durations }: { outcome: Overall; durations: number[] 
         <h2>
           判定：<span className="badge badge-unreadable" data-testid="result-status">unreadable</span>
         </h2>
-        <p className="hint">τ = {TAU_MIN}..{TAU_MAX} 中没有任何时钟能得到合法帧。</p>
+        <p className="hint">
+          τ = {TAU_MIN}..{TAU_MAX} 中没有任何时钟能得到合法帧；可在下方填写跳变量发起连续漂移复核。
+        </p>
       </section>
     );
   }
@@ -155,21 +217,99 @@ function Result({ outcome, durations }: { outcome: Overall; durations: number[] 
         </div>
       </div>
       <PulseDiagram durations={durations} result={outcome.min} />
-      <table className="codes-table" data-testid="codes-table">
-        <thead>
-          <tr><th>角色</th><th>码值</th><th>5 位（低→高，末位奇校验）</th></tr>
-        </thead>
-        <tbody>
-          {outcome.min.groups.map((g, i) => (
-            <tr key={i}>
-              <td>{roleName(i, outcome.min.groups.length)}</td>
-              <td>{g.value}</td>
-              <td className="mono">{g.bits.join(' ')}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      <CodesTable groups={outcome.min.groups} />
     </section>
+  );
+}
+
+function DriftResult({ outcome, durations }: { outcome: DriftReview; durations: number[] }) {
+  if (outcome.status === 'unreadable') {
+    return (
+      <div className="drift-result" data-testid="drift-result">
+        <h3>
+          复核判定：<span className="badge badge-unreadable" data-testid="drift-status">unreadable</span>
+        </h3>
+        <p className="hint">在该跳变量上限内，不存在让全部规则同时成立的完整见证。</p>
+      </div>
+    );
+  }
+
+  if (outcome.status === 'ambiguous') {
+    return (
+      <div className="drift-result" data-testid="drift-result">
+        <h3>
+          复核判定：<span className="badge badge-ambiguous" data-testid="drift-status">ambiguous</span>
+        </h3>
+        <p className="hint">不同轨迹解出了多个数字串（按数字串字典序排列）：</p>
+        <table className="amb-table">
+          <thead>
+            <tr><th>数字串</th><th>代表轨迹总跳变量（µs）</th></tr>
+          </thead>
+          <tbody>
+            {outcome.entries.map((e) => (
+              <tr key={e.digits} data-testid="drift-ambiguous-entry">
+                <td className="digits">{e.digits}</td>
+                <td>{e.best.totalJump}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    );
+  }
+
+  const w = outcome.best;
+  const jumps = w.clocks.slice(1).map((t, i) => t - w.clocks[i]);
+  return (
+    <div className="drift-result" data-testid="drift-result">
+      <h3>
+        复核判定：<span className="badge badge-decoded" data-testid="drift-status">decoded</span>
+      </h3>
+      <div className="result-grid">
+        <div>
+          <div className="field-label">数字串</div>
+          <div className="digits big" data-testid="drift-digits">{outcome.digits}</div>
+        </div>
+        <div>
+          <div className="field-label">总跳变量（µs）</div>
+          <div className="tau-list" data-testid="drift-total-jump">{w.totalJump}</div>
+          <div className="hint">同一内容多条轨迹时，取总跳变量最小、再取时钟序列字典序最小的一条用于图示。</div>
+        </div>
+      </div>
+      <div className="field-label">逐间隔时钟轨迹 τᵢ（µs，共 {w.clocks.length} 个间隔）</div>
+      <div className="mono traj" data-testid="drift-trajectory">
+        {w.clocks.join(', ')}
+      </div>
+      <div className="field-label">每次跳变 Δτ（µs）</div>
+      <div className="mono traj" data-testid="drift-jumps">
+        {jumps.map(formatDelta).join(', ')}
+      </div>
+      <DriftDiagram durations={durations} witness={w} />
+      <CodesTable groups={w.groups} testid="drift-codes-table" />
+    </div>
+  );
+}
+
+function formatDelta(d: number): string {
+  return d > 0 ? `+${d}` : `${d}`;
+}
+
+function CodesTable({ groups, testid = 'codes-table' }: { groups: BitGroup[]; testid?: string }) {
+  return (
+    <table className="codes-table" data-testid={testid}>
+      <thead>
+        <tr><th>角色</th><th>码值</th><th>5 位（低→高，末位奇校验）</th></tr>
+      </thead>
+      <tbody>
+        {groups.map((g, i) => (
+          <tr key={i}>
+            <td>{roleName(i, groups.length)}</td>
+            <td>{g.value}</td>
+            <td className="mono">{g.bits.join(' ')}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
   );
 }
 

@@ -32,3 +32,24 @@ export function encodeDigits(digits: string, tau = 100): number[] {
   const bits = codes.flatMap(codeToBits);
   return bitsToDurations(bits, tau).map((d) => Math.round(d));
 }
+
+/**
+ * 数字串 -> 模拟“读头持续缓慢变速”的间隔时长数组：
+ * 局部时钟从 tauFrom 沿位流线性漂移到 tauTo，每个位按其瞬时 τ 生成间隔
+ * （0 位一个长型 τ，1 位两个短型 τ/2，均四舍五入为整数微秒）。
+ */
+export function encodeDigitsDrifted(digits: string, tauFrom: number, tauTo: number): number[] {
+  if (!/^[0-9]+$/.test(digits)) throw new Error('digits 必须为 0..9 的数字串');
+  const codes = [START_CODE, ...[...digits].map((ch) => Number(ch)), END_CODE];
+  let lrc = 0;
+  for (const c of codes) lrc ^= c;
+  codes.push(lrc);
+  const bits = codes.flatMap(codeToBits);
+  const out: number[] = [];
+  bits.forEach((b, k) => {
+    const t = bits.length === 1 ? tauFrom : tauFrom + ((tauTo - tauFrom) * k) / (bits.length - 1);
+    if (b === 0) out.push(Math.round(t));
+    else out.push(Math.round(t / 2), Math.round(t / 2));
+  });
+  return out;
+}
